@@ -30,4 +30,44 @@ containers. Never jump to 3.13 for this project.
 - **Module 1 (done):** project foundation, shared Pydantic schemas
   (`libs/schemas`), `core-api` service with `/health` endpoint,
   Postgres+TimescaleDB, Redis, Docker Compose.
-- Module 2 onward: see commit history.
+- **Module 2 (done):** historical data ingestion (`services/data-pipeline`)
+  -- fetches NIFTY 50 OHLCV via yfinance into the `candles` table, then
+  computes technical indicators (EMA, SMA, RSI, MACD, ATR, volume ratio)
+  into the `features` table. See "Running Module 2" below.
+- Module 3 onward: see commit history.
+
+## Running Module 2
+
+The data-pipeline service is a **job runner**, not an always-on service --
+it's excluded from `docker compose up` by default (via a Compose
+"profile") and run explicitly, on demand:
+
+```bash
+# 1. Apply the new features-table migration (only needed once; if your
+#    postgres container already existed before this migration was added,
+#    see the note below)
+docker compose up -d postgres
+docker exec -i trading-postgres psql -U trading_user -d trading < db/init/002_features_table.sql
+
+# 2. Fetch historical OHLCV for all NIFTY 50 symbols (takes a few minutes)
+docker compose run --rm data-pipeline python -m app.ingestion.fetch_historical --period 5y
+
+# 3. Compute indicators from the candles you just fetched
+docker compose run --rm data-pipeline python -m app.features.compute_features
+```
+
+**Note on the migration:** Compose only runs files in `db/init/` automatically
+the *first time* a Postgres container is created (fresh volume). Since your
+`trading-postgres` container already exists from Module 1, step 1 above
+applies the new migration manually. If you ever wipe the volume and start
+fresh (`docker compose down -v`), both `001_` and `002_` run automatically.
+
+**Verify it worked:**
+```bash
+docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT COUNT(*) FROM candles;"
+docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT COUNT(*) FROM features;"
+docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT symbol, ts, features->'rsi_14' AS rsi FROM features ORDER BY ts DESC LIMIT 5;"
+```
+`candles` should have roughly 50 symbols × ~5 years of trading days (~1,250
+rows/symbol) = order of 60,000+ rows. `features` will have somewhat fewer,
+since warm-up rows (not enough history yet for e.g. SMA-200) are dropped.

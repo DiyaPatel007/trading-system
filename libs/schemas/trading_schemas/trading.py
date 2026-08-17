@@ -38,6 +38,8 @@ class Signal(BaseModel):
     Untaken Signals" in the problem statement.
     """
 
+    model_config = {"protected_namespaces": ()}  # allow fields named model_*
+
     signal_id: str
     symbol: str
     mode: TradingMode
@@ -54,6 +56,8 @@ class Signal(BaseModel):
 
 class Trade(BaseModel):
     """Full lifecycle record of a trade, paper or live."""
+
+    model_config = {"protected_namespaces": ()}  # allow fields named model_*
 
     trade_id: str
     signal_id: str
