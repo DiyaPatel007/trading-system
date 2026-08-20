@@ -68,6 +68,7 @@ services:
         condition: service_healthy
     profiles:
       - jobs   # not started by `up` -- only run explicitly, see README
+
   regime-engine:
     build:
       context: .
@@ -82,6 +83,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    profiles:
+      - jobs
+
+  risk-engine:
+    build:
+      context: .
+      dockerfile: services/risk-engine/Dockerfile
+    container_name: trading-risk-engine
     profiles:
       - jobs
 

@@ -4,9 +4,6 @@ or database required. Run standalone:
 
     pip install pandas pandas-ta numpy pytest
     python -m pytest tests/test_indicators.py -v
-
-These import directly from the data-pipeline service's app package, so
-this file's sys.path setup mirrors how you'd run it inside that service.
 """
 
 import sys
@@ -16,8 +13,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "services" / "data-pipeline"))
+sys.path.insert(0, str(Path(__file__).parent))
+from _helpers import use_service  # noqa: E402
 
+use_service("data-pipeline")
 from app.features.indicators import (  # noqa: E402
     FEATURE_SET_VERSION,
     compute_indicators,

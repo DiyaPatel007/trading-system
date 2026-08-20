@@ -6,8 +6,10 @@ Run: python -m pytest tests/test_regime.py -v
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "services" / "regime-engine"))
+sys.path.insert(0, str(Path(__file__).parent))
+from _helpers import use_service  # noqa: E402
 
+use_service("regime-engine")
 from app.regime import MarketRegime, compute_regime  # noqa: E402
 
 

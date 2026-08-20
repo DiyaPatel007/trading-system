@@ -34,7 +34,19 @@ containers. Never jump to 3.13 for this project.
   -- fetches NIFTY 50 OHLCV via yfinance into the `candles` table, then
   computes technical indicators (EMA, SMA, RSI, MACD, ATR, volume ratio)
   into the `features` table. See "Running Module 2" below.
-- Module 3 onward: see commit history.
+- **Module 3 (done):** market regime engine (`services/regime-engine`)
+  -- rule-based classifier (bullish/bearish/sideways/high_volatility/
+  low_volatility/transitional) computed daily from universe-wide trend,
+  volatility, and breadth, written to `market_regime`. Thresholds are
+  calibrated against real observed NIFTY 50 percentiles, not guessed --
+  see the comments at the top of `services/regime-engine/app/regime.py`
+  before changing them.
+- **Module 4 (done):** risk engine + position sizing
+  (`services/risk-engine`) -- pure, DB-free risk calculation
+  (`calculate_risk`) and position sizing (`size_position`), each with a
+  hard approve/reject gate independent of any ML prediction. No live
+  data dependency; fully covered by hand-verified unit tests.
+- Module 5 onward: see commit history.
 
 ## Running Module 2
 
@@ -71,3 +83,74 @@ docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT symb
 `candles` should have roughly 50 symbols × ~5 years of trading days (~1,250
 rows/symbol) = order of 60,000+ rows. `features` will have somewhat fewer,
 since warm-up rows (not enough history yet for e.g. SMA-200) are dropped.
+
+**Known corporate-action gotcha:** `services/data-pipeline/app/universe.py`
+must be kept in sync with real-world ticker changes (delistings, demergers,
+symbol renames) -- Yahoo Finance will 404 on a stale ticker. As of this
+module, Tata Motors' demerger and LTIMindtree's rename are already
+reflected (`TMPV.NS`/`TMCV.NS`, `LTM.NS`).
+
+**Known Yahoo Finance reliability note:** Yahoo actively rate-limits/blocks
+automated requests. `fetch_historical.py` mitigates this with browser
+impersonation (via yfinance's built-in curl_cffi support), retry with
+exponential backoff (up to 4 attempts/symbol), and a self-imposed delay
+between symbols -- but occasional failures for a handful of symbols are
+still normal, not a sign something is broken. Re-run with `--symbols` to
+retry just the ones that failed.
+
+## Running Module 3
+
+Depends on Module 2 having already populated `candles` and `features`.
+
+```bash
+# 1. Apply the migration (same one-time-manual-application note as Module 2)
+docker exec -i trading-postgres psql -U trading_user -d trading < db/init/003_market_regime_table.sql
+
+# 2. Compute regime for every day with usable history
+docker compose build regime-engine
+docker compose run --rm regime-engine python -m app.compute_regime
+```
+
+**Verify it worked:**
+```bash
+docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT COUNT(*) FROM market_regime;"
+docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT regime, COUNT(*) FROM market_regime GROUP BY regime ORDER BY COUNT(*) DESC;"
+```
+The regime distribution should NOT be dominated (~99%) by a single
+regime -- if it is, the thresholds in `app/regime.py` need recalibrating
+against your data's actual percentiles (see the query and worked example
+in that recalibration -- ask for it again if needed; the current
+thresholds were tuned this way once already).
+
+## Running Module 4
+
+Risk Engine has no database dependency and nothing to "run" against
+live data yet -- it's a pure calculation library that Module 5 (Scanner)
+will import directly. Verify it with its test suite:
+
+```bash
+pip install pytest
+python -m pytest tests/test_risk_engine.py -v
+```
+
+To build its Docker image (mostly for consistency with other services --
+nothing calls it over HTTP yet):
+```bash
+docker compose build risk-engine
+```
+
+## Running the full test suite
+
+**Important:** several services share the package name `app` internally
+(correct in production, since each runs in its own container) -- when
+running the WHOLE suite together in one process, `tests/_helpers.py`
+handles avoiding import collisions between them. Always run the suite
+from the repo root:
+
+```bash
+pip install pandas pandas-ta numpy pytest httpx psycopg[binary] pydantic pydantic-settings
+python -m pytest tests/ -v --ignore=tests/test_health_endpoint.py
+```
+(`test_health_endpoint.py` is excluded here because it requires the full
+Docker stack running on `localhost:8000` -- run it separately after
+`docker compose up` if you want to check that too.)
