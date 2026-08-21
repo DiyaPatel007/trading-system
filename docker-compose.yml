@@ -93,6 +93,23 @@ services:
     container_name: trading-risk-engine
     profiles:
       - jobs
+    
+  scanner:
+    build:
+      context: .
+      dockerfile: services/scanner/Dockerfile
+    container_name: trading-scanner
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-trading}
+      POSTGRES_USER: ${POSTGRES_USER:-trading_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - jobs
 
 volumes:
   postgres_data:
