@@ -78,7 +78,16 @@ containers. Never jump to 3.13 for this project.
   no tool re-implements any numbers. Pinned to `mcp==1.29.0` (the 1.x
   line), deliberately NOT the new `mcp` 2.0.0 -- see "Running Module 8"
   below for why. See "Running Module 8" below.
-- Module 9 onward: see commit history.
+- **Module 9 (done):** Trade Guardian (`services/trade-guardian`) --
+  re-assesses every OPEN paper trade against current price, current
+  market regime, and current RSI, checking three factors: adverse price
+  excursion toward the stop, regime deterioration since the trade
+  opened, and momentum weakening. Produces alerts and an updated (but
+  never auto-applied) risk category in a separate
+  `trade_guardian_alerts` table -- it NEVER modifies `paper_trades`,
+  stop-losses, or closes anything; alerts only. See "Running Module 9"
+  below.
+- Module 10 onward: see commit history.
 
 ## Running Module 2
 
@@ -404,6 +413,44 @@ the current market regime?" or "show me the top swing opportunities" --
 you should see it call `get_market_regime` / `get_scanner_results` and
 answer using the real data your pipeline has produced so far.
 
+## Running Module 9
+
+Depends on Module 7 (needs open `paper_trades`) and Module 3 (needs the
+latest `market_regime`). Run this periodically, alongside
+`monitor_trades.py` -- e.g. right after your daily
+ingestion -> features -> regime -> scan -> open/monitor trades cycle.
+
+```bash
+docker exec -i trading-postgres psql -U trading_user -d trading < db/init/007_trade_guardian_alerts_table.sql
+docker compose build trade-guardian
+docker compose run --rm trade-guardian python -m app.monitor_open_trades
+```
+
+**Verify it worked:**
+```bash
+docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT trade_id, alert_level, original_risk_category, updated_risk_category, adverse_excursion_pct, alerts FROM trade_guardian_alerts ORDER BY checked_at DESC LIMIT 10;"
+docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT alert_level, COUNT(*) FROM trade_guardian_alerts GROUP BY alert_level;"
+```
+
+**Important guarantee to double-check:** after running this, confirm
+`paper_trades` is completely unchanged --
+```bash
+docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT stop_loss, status FROM paper_trades WHERE status = 'open';"
+```
+`stop_loss` values and `status` must be identical to before you ran the
+Guardian. If they've changed, something is wrong -- this module is
+alerts-only by design, and that separation from `paper_trades` (a
+completely different table, no UPDATE statements anywhere in
+`monitor_open_trades.py`) is what enforces it structurally, not just by
+convention.
+
+Given your trades are likely still `still_open` with minimal price
+history so far (see Module 7's notes on this being a time-based
+process), expect mostly `alert_level = none` on early runs -- that's
+correct, not a sign the module isn't working. Re-run it after a few
+more days of ingestion have accumulated, alongside `monitor_trades.py`,
+to see it actually catch a regime shift or adverse move.
+
 ## Running the full test suite
 
 **Important:** several services share the package name `app` internally
@@ -420,4 +467,4 @@ python -m pytest tests/ -v --ignore=tests/test_health_endpoint.py
 Docker stack running on `localhost:8000` -- run it separately after
 `docker compose up` if you want to check that too.)
 
-Current count: **106 tests** across Modules 1-8.
+Current count: **119 tests** across Modules 1-9.
