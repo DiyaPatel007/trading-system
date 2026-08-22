@@ -61,7 +61,16 @@ containers. Never jump to 3.13 for this project.
   split (`train.py`), and registers each trained model with its test
   metrics in the `models` table at `stage='experimental'`. See "Running
   Module 6" below.
-- Module 7 onward: see commit history.
+- **Module 7 (done):** paper trading engine (`services/paper-trading`)
+  -- opens a simulated trade for every top-N Module 5 ranked signal
+  (`open_trades.py`, using the risk engine's `size_position` for real
+  position sizing), simulates realistic fills with slippage and
+  round-trip costs (`execution.py`), monitors open trades against real
+  future candles to determine target/stop/time exits with no lookahead
+  bias (`exit_evaluation.py`, same discipline as Module 6's labeling),
+  and computes win rate / profit factor / expected value / max drawdown
+  from closed trades (`performance.py`). See "Running Module 7" below.
+- Module 8 onward: see commit history.
 
 ## Running Module 2
 
@@ -242,6 +251,51 @@ docker compose run --rm ml-training python -m app.dataset
 ```
 Prints the first 10 labeled rows and the overall win rate directly.
 
+## Running Module 7
+
+Depends on Module 5 (needs `scanner_results` with ranked signals to
+open trades from) and Module 4's risk logic (copied in at build time,
+same pattern as Module 5 -- see the note at the top of
+`services/paper-trading/app/open_trades.py`).
+
+```bash
+docker exec -i trading-postgres psql -U trading_user -d trading < db/init/006_paper_trades_table.sql
+docker compose build paper-trading
+
+# 1. Open paper trades from the latest scanner run's top-N signals
+docker compose run --rm paper-trading python -m app.open_trades --mode swing
+
+# 2. Run this periodically (e.g. daily, after new candles are ingested
+#    via Module 2) to check open trades against real future price action
+docker compose run --rm paper-trading python -m app.monitor_trades
+
+# 3. See how it's doing so far
+docker compose run --rm paper-trading python -m app.summarize_performance
+```
+
+**Verify it worked:**
+```bash
+docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT trade_id, symbol, status, predicted_entry, actual_entry, quantity FROM paper_trades ORDER BY opened_at DESC LIMIT 10;"
+docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT status, COUNT(*) FROM paper_trades GROUP BY status;"
+```
+`actual_entry` should be slightly HIGHER than `predicted_entry` for
+every row (simulated slippage against the trader on entry -- see
+`execution.py`). Freshly-opened trades will show `status = 'open'` until
+`monitor_trades.py` finds enough new candle data to resolve them --
+this is expected to take real calendar days to fully populate, since it
+depends on new candles actually arriving via Module 2's ongoing
+ingestion, not something that resolves instantly on a single run.
+
+**Important operational note:** since Module 2's `fetch_historical.py`
+pulls a fixed historical window (e.g. `--period 5y`) rather than
+appending only new days, `monitor_trades.py` will only see NEW price
+action once you re-run ingestion after real calendar time has passed
+(e.g., run it again tomorrow to pick up today's new candle). Paper
+trading validation is inherently a forward-looking, time-based process
+-- there's no way to compress this into an instant check, by design;
+see the problem statement's "Paper Trading and Validation Before Real
+Trading" section for why this matters.
+
 ## Running the full test suite
 
 **Important:** several services share the package name `app` internally
@@ -251,11 +305,11 @@ handles avoiding import collisions between them. Always run the suite
 from the repo root:
 
 ```bash
-pip install pandas pandas-ta numpy pytest httpx psycopg[binary] pydantic pydantic-settings xgboost scikit-learn joblib
+pip install pandas pandas-ta numpy pytest httpx psycopg[binary] pydantic pydantic-settings
 python -m pytest tests/ -v --ignore=tests/test_health_endpoint.py
 ```
 (`test_health_endpoint.py` is excluded here because it requires the full
 Docker stack running on `localhost:8000` -- run it separately after
 `docker compose up` if you want to check that too.)
 
-Current count: **82 tests** across Modules 1-6.
+Current count: **101 tests** across Modules 1-7.
