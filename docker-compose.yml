@@ -146,6 +146,26 @@ services:
         condition: service_healthy
     profiles:
       - jobs
+
+  mcp-server:
+    build:
+      context: .
+      dockerfile: services/mcp-server/Dockerfile
+    container_name: trading-mcp-server
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-trading}
+      POSTGRES_USER: ${POSTGRES_USER:-trading_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    stdin_open: true
+    tty: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - jobs
+      
 volumes:
   postgres_data:
   ml_models:

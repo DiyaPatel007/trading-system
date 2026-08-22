@@ -20,6 +20,7 @@ postgres_data/
 # risk logic despite each service shipping as a self-contained image.
 services/scanner/app/risk_engine.py
 services/paper-trading/app/risk_engine.py
+services/mcp-server/app/risk_engine.py
 
 # Trained ML model artifacts -- these are large binary files that
 # regenerate from `python -m app.train`, not something to version

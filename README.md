@@ -70,7 +70,15 @@ containers. Never jump to 3.13 for this project.
   bias (`exit_evaluation.py`, same discipline as Module 6's labeling),
   and computes win rate / profit factor / expected value / max drawdown
   from closed trades (`performance.py`). See "Running Module 7" below.
-- Module 8 onward: see commit history.
+- **Module 8 (done):** MCP layer (`services/mcp-server`) -- exposes the
+  system as 8 tools an LLM can call (market regime, scanner results,
+  risk calculation, position sizing, open paper trades, paper trading
+  performance, model registry, recent candles). Every tool is a thin
+  adapter over an existing table or the same risk-engine calculation --
+  no tool re-implements any numbers. Pinned to `mcp==1.29.0` (the 1.x
+  line), deliberately NOT the new `mcp` 2.0.0 -- see "Running Module 8"
+  below for why. See "Running Module 8" below.
+- Module 9 onward: see commit history.
 
 ## Running Module 2
 
@@ -296,6 +304,106 @@ trading validation is inherently a forward-looking, time-based process
 see the problem statement's "Paper Trading and Validation Before Real
 Trading" section for why this matters.
 
+## Running Module 8
+
+### Why `mcp==1.29.0`, not the newer `mcp` 2.0.0
+
+The MCP Python SDK released a 2.0.0 stable version with pervasive
+breaking changes (FastMCP renamed to MCPServer, moved import paths,
+stateless protocol rework) alongside a major MCP spec revision. It's
+very new (weeks old at the time this module was built), and the SDK's
+own maintainers explicitly recommend most consumers stay on `<2` for
+now unless actively migrating. Our use case -- a handful of simple
+decorator-based tools for local, personal use -- doesn't need anything
+v2-specific, so this project pins `mcp==1.29.0` (the actively-maintained
+1.x line, which still receives security patches) rather than chasing
+the newest major version. Same reasoning as the Python 3.12-over-3.13
+decision from Module 1.
+
+### How this service is different from every other module
+
+Every previous service either runs as an always-on container
+(`core-api`) or a one-off job you trigger with `docker compose run`.
+This one is different: MCP servers speaking stdio are meant to be
+launched directly as a **subprocess by the MCP client itself** (Claude
+Desktop or Claude Code), not run standalone. There are two ways to set
+this up:
+
+**Option A -- local Python (recommended, simplest, most compatible):**
+
+```bash
+cd services/mcp-server
+python -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+pip install -e ../../libs/schemas
+cp ../risk-engine/app/risk.py app/risk_engine.py   # one-time manual copy -- see note below
+```
+
+Then add this to your MCP client's config (Claude Desktop:
+`claude_desktop_config.json`; Claude Code: its own MCP config file):
+```json
+{
+  "mcpServers": {
+    "trading-system": {
+      "command": "/absolute/path/to/services/mcp-server/venv/bin/python",
+      "args": ["-m", "app.server"],
+      "cwd": "/absolute/path/to/services/mcp-server",
+      "env": {
+        "POSTGRES_HOST": "localhost",
+        "POSTGRES_PASSWORD": "your_actual_password_from_.env"
+      }
+    }
+  }
+}
+```
+`POSTGRES_HOST=localhost` here is deliberate -- this runs OUTSIDE
+Docker, so it reaches Postgres via the port you exposed on the host
+(`5432:5432`), not the internal Docker network hostname `postgres`
+that every other service's config uses.
+
+**Note on `app/risk_engine.py`:** every other service that needs this
+file gets it copied in automatically at Docker build time. Since this
+path doesn't use Docker, you copy it manually (one command, shown
+above) -- and re-run that copy anytime `services/risk-engine/app/risk.py`
+changes, since there's no build step to do it for you here.
+
+**Option B -- Docker (if you'd rather not manage a separate venv):**
+```bash
+docker compose build mcp-server
+```
+Then configure your MCP client to launch it via Compose:
+```json
+{
+  "mcpServers": {
+    "trading-system": {
+      "command": "docker",
+      "args": ["compose", "-f", "/absolute/path/to/docker-compose.yml", "run", "--rm", "-T", "mcp-server"]
+    }
+  }
+}
+```
+This path needs no manual `risk_engine.py` copy (the Dockerfile handles
+it), and no `POSTGRES_HOST` override (defaults to `postgres`, correct
+inside the Docker network).
+
+### Verify it worked
+
+Without a full MCP client, you can sanity-check the server itself:
+```bash
+python -m pytest tests/test_mcp_server.py -v
+```
+Expect **5 passed** -- this confirms the tools register correctly and
+that `calculate_risk`/`size_position` produce results identical to
+Module 4's own hand-verified numbers (proving the MCP layer is a
+faithful adapter, not a re-implementation).
+
+To verify against a real running client, connect via Claude Desktop or
+Claude Code (using either option above) and ask something like "what's
+the current market regime?" or "show me the top swing opportunities" --
+you should see it call `get_market_regime` / `get_scanner_results` and
+answer using the real data your pipeline has produced so far.
+
 ## Running the full test suite
 
 **Important:** several services share the package name `app` internally
@@ -305,11 +413,11 @@ handles avoiding import collisions between them. Always run the suite
 from the repo root:
 
 ```bash
-pip install pandas pandas-ta numpy pytest httpx psycopg[binary] pydantic pydantic-settings
+pip install pandas pandas-ta numpy pytest httpx psycopg[binary] pydantic pydantic-settings xgboost scikit-learn joblib "mcp==1.29.0"
 python -m pytest tests/ -v --ignore=tests/test_health_endpoint.py
 ```
 (`test_health_endpoint.py` is excluded here because it requires the full
 Docker stack running on `localhost:8000` -- run it separately after
 `docker compose up` if you want to check that too.)
 
-Current count: **101 tests** across Modules 1-7.
+Current count: **106 tests** across Modules 1-8.
