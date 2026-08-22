@@ -14,6 +14,19 @@ venv/
 # Docker
 postgres_data/
 
+# Generated at Docker build time from services/risk-engine/app/risk.py --
+# see the note at the top of services/scanner/app/run_scan.py. Keeping
+# this out of git is what enforces "single source of truth" for the
+# risk logic despite each service shipping as a self-contained image.
+services/scanner/app/risk_engine.py
+
+# Trained ML model artifacts -- these are large binary files that
+# regenerate from `python -m app.train`, not something to version
+# control. The `models` Postgres table (not gitignored, it's just
+# metadata) tracks which artifacts exist and their metrics.
+services/ml-training/models/
+*.joblib
+
 # OS
 .DS_Store
 Thumbs.db
@@ -21,9 +34,3 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
-
-# Generated at Docker build time from services/risk-engine/app/risk.py --
-# see the note at the top of services/scanner/app/run_scan.py. Keeping
-# this out of git is what enforces "single source of truth" for the
-# risk logic despite each service shipping as a self-contained image.
-services/scanner/app/risk_engine.py

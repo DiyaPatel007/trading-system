@@ -67,7 +67,7 @@ services:
       postgres:
         condition: service_healthy
     profiles:
-      - jobs   # not started by `up` -- only run explicitly, see README
+      - jobs
 
   regime-engine:
     build:
@@ -93,7 +93,7 @@ services:
     container_name: trading-risk-engine
     profiles:
       - jobs
-    
+
   scanner:
     build:
       context: .
@@ -111,5 +111,26 @@ services:
     profiles:
       - jobs
 
+  ml-training:
+    build:
+      context: .
+      dockerfile: services/ml-training/Dockerfile
+    container_name: trading-ml-training
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-trading}
+      POSTGRES_USER: ${POSTGRES_USER:-trading_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      MODEL_ARTIFACT_DIR: /app/models
+    volumes:
+      - ml_models:/app/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - jobs
+
 volumes:
   postgres_data:
+  ml_models:

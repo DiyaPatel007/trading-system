@@ -46,7 +46,22 @@ containers. Never jump to 3.13 for this project.
   (`calculate_risk`) and position sizing (`size_position`), each with a
   hard approve/reject gate independent of any ML prediction. No live
   data dependency; fully covered by hand-verified unit tests.
-- Module 5 onward: see commit history.
+- **Module 5 (done):** scanner / ranking service (`services/scanner`) --
+  generates placeholder ATR-based trade setups (`setup_generation.py`),
+  scores them with a hand-tuned weighted composite (`scoring.py`:
+  expected value + momentum(RSI) + regime alignment + liquidity(volume
+  ratio)), enforces the risk engine's approve/reject gate inside
+  ranking itself, and writes every scanned candidate (not just the top
+  N) to `scanner_results`. See "Running Module 5" below.
+- **Module 6 (done):** ML training pipeline (`services/ml-training`) --
+  labels historical trades (target-before-stop within a fixed holding
+  window, using ONLY strictly-future bars -- see `labeling.py`),
+  builds a leak-free dataset (`dataset.py`), trains an XGBoost
+  classifier with a strictly chronological (walk-forward) train/test
+  split (`train.py`), and registers each trained model with its test
+  metrics in the `models` table at `stage='experimental'`. See "Running
+  Module 6" below.
+- Module 7 onward: see commit history.
 
 ## Running Module 2
 
@@ -139,6 +154,94 @@ nothing calls it over HTTP yet):
 docker compose build risk-engine
 ```
 
+## Running Module 5
+
+Depends on Modules 2, 3, and 4 all having run already (`candles`,
+`features`, and `market_regime` must be populated; the risk logic is
+copied in from `services/risk-engine/app/risk.py` at Docker build time
+-- see the note at the top of `services/scanner/app/run_scan.py`).
+
+```bash
+docker exec -i trading-postgres psql -U trading_user -d trading < db/init/004_scanner_results_table.sql
+docker compose build scanner
+docker compose run --rm scanner python -m app.run_scan --mode swing --top-n 5
+```
+
+This prints the top 5 ranked opportunities to stdout with full reasoning,
+and writes EVERY scanned candidate (not just the top 5) to
+`scanner_results` -- including rejected/unranked ones -- so later modules
+can compare "what the scanner said" against "what actually happened."
+
+**Verify it worked:**
+```bash
+docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT COUNT(*) FROM scanner_results;"
+docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT symbol, rank, composite_score, approved, risk_category FROM scanner_results WHERE rank IS NOT NULL ORDER BY rank;"
+docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT approved, COUNT(*) FROM scanner_results GROUP BY approved;"
+```
+The first query's top-5 should have `approved = true` for all rows (the
+risk engine's veto gate means an unapproved trade can never be ranked --
+see `rank_opportunities` in `services/scanner/app/scoring.py`). The last
+query tells you roughly what fraction of the whole universe currently
+clears the risk engine's bar -- don't expect all 50 symbols to pass;
+that would suggest the gate isn't doing anything.
+
+**Note on the placeholder setup generator:** `generate_swing_setup`
+always produces exactly a 2.0 reward:risk ratio by construction (fixed
+`TARGET_R_MULTIPLE`), so rejections you see are driven by the risk
+engine's `MAX_RISK_PCT_PER_TRADE` check (stop too wide relative to
+price), not by reward:risk -- that's expected with this placeholder,
+and will change once Module 6's ML-informed setups replace it.
+
+## Running Module 6
+
+Depends on Modules 2 and 3 (candles, features, market_regime all
+populated). Does NOT depend on Module 5 (scanner) -- it reads directly
+from `candles`/`features` and uses its own independent ATR-based setup
+logic in `dataset.py` for labeling purposes.
+
+```bash
+docker exec -i trading-postgres psql -U trading_user -d trading < db/init/005_model_registry_table.sql
+docker compose build ml-training
+docker compose run --rm ml-training python -m app.train --mode swing --test-fraction 0.2
+```
+
+This will take a few minutes depending on how much history you have.
+It prints train/test row counts and test-set metrics (accuracy, AUC,
+Brier score, win rate) to the console, saves the trained model as a
+`.joblib` file to the `ml_models` Docker volume, and registers it in
+the `models` table with `stage='experimental'`.
+
+**Verify it worked:**
+```bash
+docker exec -it trading-postgres psql -U trading_user -d trading -c "SELECT model_id, mode, n_training_rows, n_test_rows, train_win_rate, test_win_rate, test_accuracy, test_auc, test_brier_score, stage FROM models ORDER BY trained_at DESC LIMIT 5;"
+```
+
+**What to look for:**
+- `train_win_rate` and `test_win_rate` should be reasonably close (a
+  huge gap suggests the train/test periods cover very different market
+  regimes, or something is off).
+- `test_accuracy` meaningfully above 50% is the bar for "better than a
+  coin flip" -- given `generate_swing_setup`'s fixed 2:1 reward:risk,
+  even a modest edge above 50% can be profitable in expectation, but
+  don't expect dramatic numbers from this first, simple feature set and
+  placeholder setup logic.
+- `test_auc` close to 0.5 means the model isn't distinguishing winners
+  from losers at all -- a real (if weak) signal in your NIFTY 50 data
+  would show up as some real gap above 0.5, though how much is possible
+  is an open question this system is specifically built to test
+  honestly, not assume.
+- This first run is `stage='experimental'` -- promotion to
+  `candidate`/`production` isn't automated yet; that's a Module 7+
+  concern (paper trading validation) once the promotion workflow from
+  the problem statement is built.
+
+**Standalone dataset inspection** (useful for sanity-checking before a
+full training run):
+```bash
+docker compose run --rm ml-training python -m app.dataset
+```
+Prints the first 10 labeled rows and the overall win rate directly.
+
 ## Running the full test suite
 
 **Important:** several services share the package name `app` internally
@@ -148,9 +251,11 @@ handles avoiding import collisions between them. Always run the suite
 from the repo root:
 
 ```bash
-pip install pandas pandas-ta numpy pytest httpx psycopg[binary] pydantic pydantic-settings
+pip install pandas pandas-ta numpy pytest httpx psycopg[binary] pydantic pydantic-settings xgboost scikit-learn joblib
 python -m pytest tests/ -v --ignore=tests/test_health_endpoint.py
 ```
 (`test_health_endpoint.py` is excluded here because it requires the full
 Docker stack running on `localhost:8000` -- run it separately after
 `docker compose up` if you want to check that too.)
+
+Current count: **82 tests** across Modules 1-6.
